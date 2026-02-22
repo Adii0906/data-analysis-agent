@@ -150,7 +150,16 @@ def run_graph(state: dict) -> dict:
         if "graph" not in st.session_state or st.session_state.graph is None:
             from graph import build_graph
             st.session_state.graph = build_graph()
-            
+        
+        # Initialize missing state fields
+        state.setdefault("current_step", "")
+        state.setdefault("step_status", "pending")
+        state.setdefault("messages", [])
+        state.setdefault("retry_count", 0)
+        state.setdefault("error_log", [])
+        state.setdefault("awaiting_user_input", False)
+        state.setdefault("chart_paths", [])
+        
         for chunk in st.session_state.graph.stream(state, stream_mode="values"):
             state = chunk
             st.session_state.agent_state = state
@@ -232,7 +241,6 @@ def sidebar():
         cur    = state.get("current_step", "")
         status = state.get("step_status", "")
 
-        steps_html = ""
         # Find index of current step
         cur_idx = -1
         for i, (sid, _) in enumerate(STEPS):
@@ -240,64 +248,41 @@ def sidebar():
                 cur_idx = i
                 break
 
+        # Build pipeline progress display
+        progress_html = '<style>@keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.2); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }</style>'
+        progress_html += '<div style="background:#0F1F38;border:1px solid #1A2F4A;border-radius:12px;padding:16px 18px;margin:4px 12px 12px;box-shadow: 0 4px 15px rgba(0,0,0,0.3);">'
+        progress_html += '<div style="font-size:.7rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#6B85A8;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;"><span>PIPELINE PROGRESS</span><span style="background:rgba(59,130,246,0.1);padding:2px 6px;border-radius:4px;color:#3B82F6;font-size:0.6rem;">' + str(cur_idx+1 if cur_idx >=0 else 0) + '/' + str(len(STEPS)) + '</span></div>'
+
         for i, (sid, slabel) in enumerate(STEPS):
             if i < cur_idx:
                 # Completed
-                dot_style = "background:#22C55E; box-shadow: 0 0 4px #22C55E;"
-                txt_style = "color:#4ADE80; opacity: 0.9;"
-                icon      = "✅"
-                bg_style  = "background: rgba(34, 197, 94, 0.05);"
+                dot = 'style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#22C55E;box-shadow:0 0 4px #22C55E;"'
+                txt = 'style="flex-grow:1;color:#4ADE80;opacity:0.9;font-size:.78rem;font-family:\'Inter\',sans-serif;"'
+                icon = "✅"
+                bg = 'style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;background:rgba(34,197,94,0.05);border-radius:8px;transition:all 0.3s ease;"'
             elif i == cur_idx:
                 # Active
                 if status == "error":
-                    dot_style = "background:#EF4444; box-shadow: 0 0 8px #EF4444;"
-                    txt_style = "color:#F87171; font-weight:700;"
-                    icon      = "❌"
-                    bg_style  = "background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);"
-                elif status == "pending" or status == "" or status == "running":
-                    dot_style = "background:#F59E0B; box-shadow: 0 0 10px #F59E0B; animation: pulse 2s infinite;"
-                    txt_style = "color:#FBBF24; font-weight:700;"
-                    icon      = "⏳"
-                    bg_style  = "background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.2);"
-                else: # done but still current? usually doesn't stay here long
-                    dot_style = "background:#22C55E;"
-                    txt_style = "color:#4ADE80;"
-                    icon      = "✅"
-                    bg_style  = "background: rgba(34, 197, 94, 0.05);"
+                    dot = 'style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#EF4444;box-shadow:0 0 8px #EF4444;"'
+                    txt = 'style="flex-grow:1;color:#F87171;font-weight:700;font-size:.78rem;font-family:\'Inter\',sans-serif;"'
+                    icon = "❌"
+                    bg = 'style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.2);border-radius:8px;transition:all 0.3s ease;"'
+                else:  # pending or running
+                    dot = 'style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#F59E0B;box-shadow:0 0 10px #F59E0B;animation:pulse 2s infinite;"'
+                    txt = 'style="flex-grow:1;color:#FBBF24;font-weight:700;font-size:.78rem;font-family:\'Inter\',sans-serif;"'
+                    icon = "⏳"
+                    bg = 'style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.2);border-radius:8px;transition:all 0.3s ease;"'
             else:
                 # Future
-                dot_style = "background:#1A2F4A;"
-                txt_style = "color:#3A5070;"
-                icon      = "⚪"
-                bg_style  = "background: transparent;"
+                dot = 'style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#1A2F4A;"'
+                txt = 'style="flex-grow:1;color:#3A5070;font-size:.78rem;font-family:\'Inter\',sans-serif;"'
+                icon = "⚪"
+                bg = 'style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;background:transparent;border-radius:8px;transition:all 0.3s ease;"'
 
-            steps_html += f"""
-            <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;{bg_style} border-radius:8px;transition: all 0.3s ease;">
-              <div style="width:8px;height:8px;border-radius:50%;flex-shrink:0;{dot_style}"></div>
-              <div style="flex-grow:1;{txt_style} font-size:.78rem; font-family:'Inter', sans-serif;">{slabel}</div>
-              <div style="font-size:0.8rem;">{icon}</div>
-            </div>"""
+            progress_html += f'<div {bg}><div {dot}></div><div {txt}>{slabel}</div><div style="font-size:0.8rem;">{icon}</div></div>'
 
-        st.markdown(f"""
-        <style>
-        @keyframes pulse {{
-          0% {{ transform: scale(1); opacity: 1; }}
-          50% {{ transform: scale(1.2); opacity: 0.7; }}
-          100% {{ transform: scale(1); opacity: 1; }}
-        }}
-        </style>
-        <div style="background:#0F1F38;border:1px solid #1A2F4A;border-radius:12px;
-                    padding:16px 18px;margin:4px 12px 12px;box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
-          <div style="font-size:.7rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
-                      color:#6B85A8;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-            <span>PIPELINE PROGRESS</span>
-            <span style="background:rgba(59,130,246,0.1);padding:2px 6px;border-radius:4px;color:#3B82F6;font-size:0.6rem;">
-              {cur_idx+1 if cur_idx >=0 else 0}/{len(STEPS)}
-            </span>
-          </div>
-          {steps_html}
-        </div>
-        """, unsafe_allow_html=True)
+        progress_html += '</div>'
+        st.markdown(progress_html, unsafe_allow_html=True)
 
         # ── Config card ─────────────────────────────────────────────────────
         st.markdown("""
@@ -426,6 +411,9 @@ def main():
                 "error_log":           [],
                 "user_confirmed":      False,
                 "awaiting_user_input": False,
+                "current_step":        "",
+                "step_status":         "pending",
+                "chart_paths":         [],
             })
 
         st.session_state.agent_state = state
