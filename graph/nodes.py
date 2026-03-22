@@ -263,31 +263,46 @@ def execute_analysis_node(state: dict) -> dict:
 
     path        = state.get("working_copy_path") or state.get("original_path")
     chart_paths = []
+    
+    query_text = state.get('user_query', '').lower()
+    is_auto_eda = not query_text or any(k in query_text for k in [
+        "auto eda", "analyze dataset", "full eda", "complete overview",
+        "generate report", "final report", "export report"
+    ])
 
+    msg = "⚙️ Running full Auto EDA and generating charts…" if is_auto_eda else "⚙️ Computing statistics for specific query…"
     state.setdefault("messages", []).append({
-        "role": "assistant", "content": "⚙️ Running statistical tools and generating charts…"
+        "role": "assistant", "content": msg
     })
 
     stats_str, state = _call(compute_statistics, path, state)
     if stats_str:
         state["stats_json"] = stats_str
 
-    for fn in [plot_distributions, plot_correlation_heatmap, plot_boxplots, plot_categorical_bars]:
-        res, state = _call(fn, path, state, VisualizationError)
-        if res:
-            try:
-                r = json.loads(res)
-                if r.get("status") == "success":
-                    chart_paths.append(r["path"])
-            except Exception:
-                pass
+    if is_auto_eda:
+        for fn in [plot_distributions, plot_correlation_heatmap, plot_boxplots, plot_categorical_bars]:
+            res, state = _call(fn, path, state, VisualizationError)
+            if res:
+                try:
+                    r = json.loads(res)
+                    if r.get("status") == "success":
+                        chart_paths.append(r["path"])
+                except Exception:
+                    pass
 
     state["chart_paths"] = chart_paths
     state["step_status"] = "done"
-    state.setdefault("messages", []).append({
-        "role": "assistant",
-        "content": f"📈 Done — {len(chart_paths)} charts generated.",
-    })
+    
+    if is_auto_eda:
+        state.setdefault("messages", []).append({
+            "role": "assistant",
+            "content": f"📈 Done — {len(chart_paths)} charts generated.",
+        })
+    else:
+         state.setdefault("messages", []).append({
+            "role": "assistant",
+            "content": "📈 Done computing statistics.",
+        })       
     return state
 
 
@@ -302,21 +317,91 @@ def summarize_findings_node(state: dict, llm) -> dict:
     state["step_status"]  = "running"
 
     try:
+        query_text = state.get('user_query', '').strip()
+        system_prompt = (
+            "You are a Data Analysis Agent.\n"
+            "A smart assistant that helps users explore datasets step by step, answer questions in natural language, and generate clear insights with visualizations and final reports.\n\n"
+            "## How It Works\n"
+            "* Users ask questions in natural language about the dataset\n"
+            "* You analyze ONLY what is asked (no full EDA by default)\n"
+            "* You guide the user step by step like a real data analyst\n"
+            "* You maintain context for follow-up questions\n"
+            "* You generate a final structured report when requested\n\n"
+            "## Instructions\n"
+            "1. Understand the user query\n"
+            "   * Identify intent (trend, comparison, distribution, summary, anomaly)\n"
+            "   * Identify relevant dataset columns\n"
+            "2. Step-by-step analysis\n"
+            "   * Perform ONLY the requested analysis\n"
+            "   * Do NOT run full dataset analysis unless explicitly asked\n"
+            "   * Build on previous context for follow-up queries\n"
+            "3. User interaction\n"
+            "   * Briefly explain what you are doing (1-2 lines, simple language)\n"
+            "   * Keep responses conversational and clear\n"
+            "4. Visualization\n"
+            "   * Suggest the most appropriate chart (line, bar, histogram, scatter)\n"
+            "   * Explain what the chart represents\n"
+            "5. Insights\n"
+            "   * Provide clear, simple insights\n"
+            "   * Highlight key trends, comparisons, or anomalies\n\n"
+            "## Auto EDA (ONLY WHEN EXPLICITLY REQUESTED)\n"
+            "Run full dataset analysis ONLY if user asks (e.g., \"analyze dataset\", \"full EDA\", \"complete overview\"):\n"
+            "* Dataset shape\n"
+            "* Column types\n"
+            "* Missing values\n"
+            "* Summary statistics\n"
+            "* Key patterns\n"
+            "* 3-5 relevant visualizations\n\n"
+            "## Final Report Mode\n"
+            "If the user asks for a report (e.g., \"generate report\", \"final report\", \"export report\"):\n"
+            "Generate a structured report using previous analyses following the structure:\n"
+            "### 📌 Overview\n"
+            "* Brief summary of dataset and purpose\n"
+            "### 🔍 Key Analyses Performed\n"
+            "* Step-by-step summary of what was analyzed\n"
+            "### 📊 Visualizations\n"
+            "* Charts created and what they show\n"
+            "### 💡 Key Insights\n"
+            "* Most important findings\n"
+            "### 📈 Recommendations (Optional)\n"
+            "* Suggested next steps or actions\n\n"
+            "## Output Format (Normal Queries)\n"
+            "### 💬 Plan\n"
+            "(short explanation of current step)\n"
+            "### 📊 Visualization\n"
+            "(chart type + what it shows)\n"
+            "### 💡 Insights\n"
+            "* Key finding 1\n"
+            "* Key finding 2\n"
+            "* Key finding 3\n\n"
+            "## Rules\n"
+            "* Do NOT run full EDA automatically\n"
+            "* Do NOT hallucinate column names\n"
+            "* Keep responses simple and non-technical\n"
+            "* Maintain context across queries\n"
+            "* Do NOT generate code\n"
+            "* Be concise, clear, and product-like\n"
+            "You behave like a mini SaaS data analysis tool, not just a chatbot."
+        )
+        human_prompt = (
+            f"Dataset: {state.get('dataset_name','Dataset')}\n"
+            f"User Query: {query_text if query_text else 'Analyze dataset (Auto EDA)'}\n"
+            f"Schema: {json.dumps(state.get('schema_info',{}), default=str)[:1000]}\n"
+            f"Historical Context / Chat Messages: {json.dumps(state.get('messages', [])[-3:])}\n"
+            f"Statistics Sample: {state.get('stats_json','{}')[:2000]}\n\n"
+            "Perform the analysis and generate the required markdown response."
+        )
+
         resp = llm.invoke([
-            SystemMessage(content=(
-                "You are a senior data analyst writing for a business audience. "
-                "Write a clear 3–5 paragraph narrative from the statistics provided. "
-                "Highlight key findings, correlations, outliers, and actionable observations. "
-                "No bullet points — flowing paragraphs only."
-            )),
-            HumanMessage(content=(
-                f"Dataset: {state.get('dataset_name','Dataset')}\n"
-                f"Statistics: {state.get('stats_json','{}')[:2000]}\n\n"
-                "Write the analysis narrative."
-            )),
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt),
         ])
         state["analysis_summary"] = resp.content
         state["step_status"]      = "done"
+        state.setdefault("messages", []).append({
+            "role": "assistant",
+            "content": f"📝 **Analysis Narrative**\n\n{resp.content}"
+        })
     except Exception as e:
         err = LLMError(str(e), {}, e)
         state["last_error"] = err
@@ -329,12 +414,23 @@ def summarize_findings_node(state: dict, llm) -> dict:
 # ── Node 8: generate report ───────────────────────────────────────────────────
 
 def generate_report_node(state: dict) -> dict:
-    if state.get("report_html"):
+    if state.get("report_html") and state.get("report_html") != "skip":
         state["step_status"] = "done"
         return state
 
     state["current_step"] = "generate_report"
     state["step_status"]  = "running"
+    
+    query_text = state.get('user_query', '').lower()
+    is_report = not query_text or any(k in query_text for k in [
+        "generate report", "final report", "export report", 
+        "auto eda", "analyze dataset", "full eda", "complete overview"
+    ])
+    
+    if not is_report:
+        state["report_html"] = "skip"
+        state["step_status"] = "done"
+        return state
 
     result_str, state = _call(
         generate_html_report,
@@ -352,6 +448,6 @@ def generate_report_node(state: dict) -> dict:
         state["step_status"] = "done"
         state.setdefault("messages", []).append({
             "role": "assistant",
-            "content": "📄 **Report generated** — displaying now.",
+            "content": "📄 **Report generated** — full HTML layout is ready.",
         })
     return state
